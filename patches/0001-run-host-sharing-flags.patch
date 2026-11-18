@@ -1,0 +1,326 @@
+From: Metavert LLC <jon@metavert.io>
+Subject: [PATCH] lume run: opt-out flags for host sharing (clipboard, audio, Rosetta)
+
+Lume attaches three host-sharing devices to every VM: the SPICE agent
+console port with clipboard sharing, a virtio sound device wired to the
+host speakers and microphone, and (Linux guests) the Rosetta share.
+Defaults are unchanged. New flags turn each off:
+  --no-share-clipboard  --no-share-audio  --no-share-rosetta
+  --no-host-sharing     (all three)
+A saved state taken with other devices falls back to a boot (restoreOrBoot).
+
+---
+ libs/lume/src/Commands/Run.swift                   | 30 ++++++-
+ libs/lume/src/LumeController.swift                 |  6 +-
+ libs/lume/src/VM/VM.swift                          |  6 +-
+ .../Virtualization/VMVirtualizationService.swift   | 94 ++++++++++++----------
+ libs/lume/tests/HostSharingTests.swift             | 56 +++++++++++++
+ libs/lume/tests/Mocks/MockVM.swift                 |  5 +-
+ 6 files changed, 150 insertions(+), 47 deletions(-)
+
+diff --git a/libs/lume/src/Commands/Run.swift b/libs/lume/src/Commands/Run.swift
+index 37827b9..c09e243 100644
+--- a/libs/lume/src/Commands/Run.swift
++++ b/libs/lume/src/Commands/Run.swift
+@@ -112,6 +112,33 @@ struct Run: AsyncParsableCommand {
+     )
+     var clipboard: Bool = false
+ 
++    @Flag(
++        inversion: .prefixedNo,
++        help: "Share the host clipboard with the guest through the SPICE agent port (default: on).")
++    var shareClipboard: Bool = true
++
++    @Flag(
++        inversion: .prefixedNo,
++        help: "Attach a sound device connected to the host's audio output and microphone (default: on).")
++    var shareAudio: Bool = true
++
++    @Flag(
++        inversion: .prefixedNo,
++        help: "Linux guests: share Rosetta for running x86-64 binaries (default: on when installed).")
++    var shareRosetta: Bool = true
++
++    @Flag(
++        name: .customLong("no-host-sharing"),
++        help: "Isolate the guest from the host: --no-share-clipboard --no-share-audio --no-share-rosetta.")
++    var noHostSharing: Bool = false
++
++    /// What the guest shares with the host: everything unless turned off.
++    var hostSharing: HostSharing {
++        noHostSharing
++            ? .none
++            : HostSharing(clipboard: shareClipboard, audio: shareAudio, rosetta: shareRosetta)
++    }
++
+     private var parsedNetworkMode: NetworkMode? {
+         get throws {
+             guard let network else {
+@@ -225,7 +252,8 @@ struct Run: AsyncParsableCommand {
+             additionalDiskPaths: parsedAdditionalDisks.isEmpty ? nil : parsedAdditionalDisks,
+             networkMode: parsedNetworkMode,
+             clipboard: clipboard,
+-            vncPolicy: vnc
++            vncPolicy: vnc,
++            hostSharing: hostSharing
+         )
+     }
+ }
+diff --git a/libs/lume/src/LumeController.swift b/libs/lume/src/LumeController.swift
+index 3d8ad98..8b38f93 100644
+--- a/libs/lume/src/LumeController.swift
++++ b/libs/lume/src/LumeController.swift
+@@ -1353,7 +1353,8 @@ final class LumeController {
+         clipboard: Bool = false,
+         vncPolicy: VNCPolicy = .enabled,
+         forwards: [UInt16] = [],
+-        telemetryTransport: TelemetryTransport = .cli
++        telemetryTransport: TelemetryTransport = .cli,
++        hostSharing: HostSharing = .all
+     ) async throws {
+         let normalizedName = normalizeVMName(name: name)
+         let effectiveDisplayMode = displayMode ?? (noDisplay ? .none : .vnc)
+@@ -1516,7 +1517,8 @@ final class LumeController {
+                 networkMode: networkMode,
+                 clipboard: clipboard,
+                 vncPolicy: vncPolicy,
+-                forwards: forwards)
++                forwards: forwards,
++                hostSharing: hostSharing)
+             // `run` returns once the guest has stopped, including when it shut
+             // itself down, so the VM no longer runs in this process.
+             SharedVM.shared.removeVM(name: normalizedName, ifSame: vm)
+diff --git a/libs/lume/src/VM/VM.swift b/libs/lume/src/VM/VM.swift
+index b1f0eb5..da78f73 100644
+--- a/libs/lume/src/VM/VM.swift
++++ b/libs/lume/src/VM/VM.swift
+@@ -223,7 +223,8 @@ class VM {
+         vncPort: Int = 0, vncPassword: String? = nil, recoveryMode: Bool = false,
+         usbMassStoragePaths: [Path]? = nil, additionalDiskPaths: [Path]? = nil,
+         networkMode: NetworkMode? = nil, clipboard: Bool = false,
+-        vncPolicy: VNCPolicy = .enabled, forwards: [UInt16] = []
++        vncPolicy: VNCPolicy = .enabled, forwards: [UInt16] = [],
++        hostSharing: HostSharing = .all
+     ) async throws {
+         // Defense in depth: the CLI and the controller reject these combinations
+         // first, but no caller may reach a VNC-dependent path with VNC disabled.
+@@ -357,6 +358,9 @@ class VM {
+                 hasSavedState: !recoveryMode && vmDirContext.dir.hasSavedState(),
+                 savedStateHasVsock: vmDirContext.dir.savedStateHasVsock())
+             config.socketDevice = activeSocketDevice
++            // A saved state taken with other host devices can't be restored;
++            // restoreOrBoot then boots the VM instead.
++            config.hostSharing = hostSharing
+             vmDirContext.dir.clearVsockSession()
+             Logger.info(
+                 "Successfully created virtualization service context",
+diff --git a/libs/lume/src/Virtualization/VMVirtualizationService.swift b/libs/lume/src/Virtualization/VMVirtualizationService.swift
+index a9e903c..fd35bbd 100644
+--- a/libs/lume/src/Virtualization/VMVirtualizationService.swift
++++ b/libs/lume/src/Virtualization/VMVirtualizationService.swift
+@@ -19,6 +19,54 @@ struct VMVirtualizationServiceContext {
+     let networkMode: NetworkMode
+     /// Adds a virtio socket device (for host port forwards over vsock).
+     var socketDevice: Bool = false
++    /// Host resources shared with the guest (clipboard, audio, Rosetta). All by default.
++    var hostSharing: HostSharing = .all
++}
++
++/// Host resources a VM is connected to. Lume shares all of them by default;
++/// `lume run --no-share-clipboard`, `--no-share-audio`, `--no-share-rosetta`
++/// or `--no-host-sharing` leaves them out, for guests that should stay
++/// isolated from the host (untrusted software, automation).
++public struct HostSharing: Sendable, Equatable {
++    /// The SPICE agent console port with clipboard sharing.
++    public var clipboard: Bool
++    /// A virtio sound device wired to the host's audio output and input.
++    public var audio: Bool
++    /// Linux guests: the Rosetta directory share for x86-64 binaries.
++    public var rosetta: Bool
++
++    public init(clipboard: Bool = true, audio: Bool = true, rosetta: Bool = true) {
++        self.clipboard = clipboard
++        self.audio = audio
++        self.rosetta = rosetta
++    }
++
++    public static let all = HostSharing()
++    public static let none = HostSharing(clipboard: false, audio: false, rosetta: false)
++
++    /// Adds the audio and clipboard devices this value allows. Rosetta is a
++    /// directory share and is handled with the other shares (Linux guests).
++    func attachDevices(to vzConfig: VZVirtualMachineConfiguration) {
++        if audio {
++            let soundDeviceConfiguration = VZVirtioSoundDeviceConfiguration()
++            let inputAudioStreamConfiguration = VZVirtioSoundDeviceInputStreamConfiguration()
++            let outputAudioStreamConfiguration = VZVirtioSoundDeviceOutputStreamConfiguration()
++            inputAudioStreamConfiguration.source = VZHostAudioInputStreamSource()
++            outputAudioStreamConfiguration.sink = VZHostAudioOutputStreamSink()
++            soundDeviceConfiguration.streams = [inputAudioStreamConfiguration, outputAudioStreamConfiguration]
++            vzConfig.audioDevices = [soundDeviceConfiguration]
++        }
++        if clipboard {
++            let spiceAgentConsoleDevice = VZVirtioConsoleDeviceConfiguration()
++            let spiceAgentPort = VZVirtioConsolePortConfiguration()
++            spiceAgentPort.name = VZSpiceAgentPortAttachment.spiceAgentPortName
++            let spiceAgentPortAttachment = VZSpiceAgentPortAttachment()
++            spiceAgentPortAttachment.sharesClipboard = true
++            spiceAgentPort.attachment = spiceAgentPortAttachment
++            spiceAgentConsoleDevice.ports[0] = spiceAgentPort
++            vzConfig.consoleDevices.append(spiceAgentConsoleDevice)
++        }
++    }
+ }
+ 
+ /// Protocol defining the interface for virtualization operations
+@@ -491,26 +539,8 @@ final class DarwinVirtualizationService: BaseVirtualizationService {
+             vzConfig.socketDevices = [VZVirtioSocketDeviceConfiguration()]
+         }
+         
+-        // Audio configuration
+-        let soundDeviceConfiguration = VZVirtioSoundDeviceConfiguration()
+-        let inputAudioStreamConfiguration = VZVirtioSoundDeviceInputStreamConfiguration()
+-        let outputAudioStreamConfiguration = VZVirtioSoundDeviceOutputStreamConfiguration()
+-        
+-        inputAudioStreamConfiguration.source = VZHostAudioInputStreamSource()
+-        outputAudioStreamConfiguration.sink = VZHostAudioOutputStreamSink()
+-        
+-        soundDeviceConfiguration.streams = [inputAudioStreamConfiguration, outputAudioStreamConfiguration]
+-        vzConfig.audioDevices = [soundDeviceConfiguration]
+-        
+-        // Clipboard sharing via Spice agent
+-        let spiceAgentConsoleDevice = VZVirtioConsoleDeviceConfiguration()
+-        let spiceAgentPort = VZVirtioConsolePortConfiguration()
+-        spiceAgentPort.name = VZSpiceAgentPortAttachment.spiceAgentPortName
+-        let spiceAgentPortAttachment = VZSpiceAgentPortAttachment()
+-        spiceAgentPortAttachment.sharesClipboard = true
+-        spiceAgentPort.attachment = spiceAgentPortAttachment
+-        spiceAgentConsoleDevice.ports[0] = spiceAgentPort
+-        vzConfig.consoleDevices.append(spiceAgentConsoleDevice)
++        // Audio and clipboard sharing with the host (see HostSharing).
++        config.hostSharing.attachDevices(to: vzConfig)
+ 
+         // Optional serial console for debugging. When LUME_SERIAL_CONSOLE points
+         // at a writable path, attach a virtio serial port whose output is written
+@@ -716,33 +746,15 @@ final class LinuxVirtualizationService: BaseVirtualizationService {
+             vzConfig.socketDevices = [VZVirtioSocketDeviceConfiguration()]
+         }
+ 
+-        // Audio configuration
+-        let soundDeviceConfiguration = VZVirtioSoundDeviceConfiguration()
+-        let inputAudioStreamConfiguration = VZVirtioSoundDeviceInputStreamConfiguration()
+-        let outputAudioStreamConfiguration = VZVirtioSoundDeviceOutputStreamConfiguration()
+-        
+-        inputAudioStreamConfiguration.source = VZHostAudioInputStreamSource()
+-        outputAudioStreamConfiguration.sink = VZHostAudioOutputStreamSink()
+-        
+-        soundDeviceConfiguration.streams = [inputAudioStreamConfiguration, outputAudioStreamConfiguration]
+-        vzConfig.audioDevices = [soundDeviceConfiguration]
+-
+-        // Clipboard sharing via Spice agent
+-        let spiceAgentConsoleDevice = VZVirtioConsoleDeviceConfiguration()
+-        let spiceAgentPort = VZVirtioConsolePortConfiguration()
+-        spiceAgentPort.name = VZSpiceAgentPortAttachment.spiceAgentPortName
+-        let spiceAgentPortAttachment = VZSpiceAgentPortAttachment()
+-        spiceAgentPortAttachment.sharesClipboard = true
+-        spiceAgentPort.attachment = spiceAgentPortAttachment
+-        spiceAgentConsoleDevice.ports[0] = spiceAgentPort
+-        vzConfig.consoleDevices.append(spiceAgentConsoleDevice)
++        // Audio and clipboard sharing with the host (see HostSharing).
++        config.hostSharing.attachDevices(to: vzConfig)
+ 
+         // Directory sharing
+         var directorySharingDevices = createDirectorySharingDevices(
+             sharedDirectories: config.sharedDirectories)
+ 
+         // Add Rosetta support if available
+-        if #available(macOS 13.0, *) {
++        if #available(macOS 13.0, *), config.hostSharing.rosetta {
+             if VZLinuxRosettaDirectoryShare.availability == .installed {
+                 do {
+                     let rosettaShare = try VZLinuxRosettaDirectoryShare()
+diff --git a/libs/lume/tests/HostSharingTests.swift b/libs/lume/tests/HostSharingTests.swift
+new file mode 100644
+index 0000000..5d4025d
+--- /dev/null
++++ b/libs/lume/tests/HostSharingTests.swift
+@@ -0,0 +1,56 @@
++import Testing
++import Virtualization
++
++@testable import lume
++
++@MainActor
++@Test("run shares the clipboard, audio and Rosetta by default")
++func runSharesEverythingByDefault() throws {
++    let command = try #require(try Lume.parseAsRoot(["run", "test-vm"]) as? Run)
++    #expect(command.hostSharing == .all)
++}
++
++@MainActor
++@Test("run --no-host-sharing isolates the guest from the host")
++func runNoHostSharing() throws {
++    let command = try #require(try Lume.parseAsRoot(["run", "test-vm", "--no-host-sharing"]) as? Run)
++    #expect(command.hostSharing == .none)
++}
++
++@MainActor
++@Test("run --no-share-* turns off one resource at a time")
++func runIndividualOptOuts() throws {
++    let noClipboard = try #require(try Lume.parseAsRoot(["run", "vm", "--no-share-clipboard"]) as? Run)
++    #expect(noClipboard.hostSharing == HostSharing(clipboard: false, audio: true, rosetta: true))
++    let noAudio = try #require(try Lume.parseAsRoot(["run", "vm", "--no-share-audio"]) as? Run)
++    #expect(noAudio.hostSharing == HostSharing(clipboard: true, audio: false, rosetta: true))
++    let noRosetta = try #require(try Lume.parseAsRoot(["run", "vm", "--no-share-rosetta"]) as? Run)
++    #expect(noRosetta.hostSharing == HostSharing(clipboard: true, audio: true, rosetta: false))
++}
++
++@MainActor
++@Test("run --clipboard (SSH sync) is independent of host sharing")
++func runSSHClipboardIndependent() throws {
++    let command = try #require(
++        try Lume.parseAsRoot(["run", "vm", "--clipboard", "--no-host-sharing"]) as? Run)
++    #expect(command.clipboard)
++    #expect(command.hostSharing == .none)
++}
++
++@Test("HostSharing attaches only the devices it allows")
++func hostSharingAttachesAllowedDevices() {
++    let all = VZVirtualMachineConfiguration()
++    HostSharing.all.attachDevices(to: all)
++    #expect(all.audioDevices.count == 1)
++    #expect(all.consoleDevices.count == 1)
++
++    let none = VZVirtualMachineConfiguration()
++    HostSharing.none.attachDevices(to: none)
++    #expect(none.audioDevices.isEmpty)
++    #expect(none.consoleDevices.isEmpty)
++
++    let clipboardOnly = VZVirtualMachineConfiguration()
++    HostSharing(clipboard: true, audio: false, rosetta: false).attachDevices(to: clipboardOnly)
++    #expect(clipboardOnly.audioDevices.isEmpty)
++    #expect(clipboardOnly.consoleDevices.count == 1)
++}
+diff --git a/libs/lume/tests/Mocks/MockVM.swift b/libs/lume/tests/Mocks/MockVM.swift
+index 3177087..578121a 100644
+--- a/libs/lume/tests/Mocks/MockVM.swift
++++ b/libs/lume/tests/Mocks/MockVM.swift
+@@ -26,7 +26,8 @@ class MockVM: VM {
+         vncPort: Int = 0, vncPassword: String? = nil, recoveryMode: Bool = false,
+         usbMassStoragePaths: [Path]? = nil, additionalDiskPaths: [Path]? = nil,
+         networkMode: NetworkMode? = nil, clipboard: Bool = false,
+-        vncPolicy: VNCPolicy = .enabled, forwards: [UInt16] = []
++        vncPolicy: VNCPolicy = .enabled, forwards: [UInt16] = [],
++        hostSharing: HostSharing = .all
+     ) async throws {
+         mockIsRunning = true
+         try await super.run(
+@@ -35,7 +36,7 @@ class MockVM: VM {
+             usbMassStoragePaths: usbMassStoragePaths,
+             additionalDiskPaths: additionalDiskPaths,
+             networkMode: networkMode, clipboard: clipboard,
+-            vncPolicy: vncPolicy, forwards: forwards
++            vncPolicy: vncPolicy, forwards: forwards, hostSharing: hostSharing
+         )
+     }
+ 

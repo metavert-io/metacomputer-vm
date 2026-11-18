@@ -1,0 +1,166 @@
+From: Metavert LLC <jon@metavert.io>
+Subject: [PATCH] mcomp-vm: show its own name and version
+
+The command name in usage lines and help is mcomp-vm, `--version` prints
+the Lume version and the mcomp-vm revision (0.7.2-mcomp.2), and the help
+banner says what it is, "mcomp-vm 0.7.2-mcomp.2: metacomputer's build of
+Lume 0.7.2", without Lume's logo. The native VM window and its menu use
+the same name.
+Nothing users depend on changes: the ~/.lume storage, the settings file,
+the LUME_* environment variables, the serve API, the binary's file name,
+and Lume.Version.current, which the API, the update check and telemetry
+report.
+---
+ libs/lume/src/MCompVM.swift                  | 18 ++++++++++
+ libs/lume/src/Main.swift                     | 16 ++++-----
+ libs/lume/src/VM/NativeApplicationLoop.swift |  2 +-
+ libs/lume/src/VM/VMDisplayPresenter.swift    |  4 +--
+ libs/lume/tests/MCompVMNameTests.swift       | 35 ++++++++++++++++++++
+ 5 files changed, 62 insertions(+), 13 deletions(-)
+ create mode 100644 libs/lume/src/MCompVM.swift
+ create mode 100644 libs/lume/tests/MCompVMNameTests.swift
+
+diff --git a/libs/lume/src/MCompVM.swift b/libs/lume/src/MCompVM.swift
+new file mode 100644
+index 0000000..723a098
+--- /dev/null
++++ b/libs/lume/src/MCompVM.swift
+@@ -0,0 +1,18 @@
++/// How this build introduces itself.
++///
++/// mcomp-vm is metacomputer's build of Lume, made by Metavert, not by Cua.
++/// Only the name and version people see change: the command name in usage
++/// lines, `--version`, the help banner and the VM window's title. Everything
++/// else stays Lume's: the `~/.lume` storage, the settings file, the `LUME_*`
++/// environment variables, the `serve` API, and `Lume.Version.current`, which
++/// the API, the update check and telemetry keep reporting.
++enum MCompVM {
++    /// The command name shown in usage lines, help and window titles.
++    static let name = "mcomp-vm"
++
++    /// This build's revision on top of the Lume release (MCOMP_REVISION in UPSTREAM).
++    static let revision = 2
++
++    /// What `--version` prints: the Lume version, then `-mcomp.<revision>`.
++    static var version: String { "\(Lume.Version.current)-mcomp.\(revision)" }
++}
+diff --git a/libs/lume/src/Main.swift b/libs/lume/src/Main.swift
+index 22b7678..9ae868b 100644
+--- a/libs/lume/src/Main.swift
++++ b/libs/lume/src/Main.swift
+@@ -7,9 +7,9 @@ import Foundation
+ struct Lume: AsyncParsableCommand {
+     static var configuration: CommandConfiguration {
+         CommandConfiguration(
+-            commandName: "lume",
++            commandName: MCompVM.name,
+             abstract: "A lightweight CLI and local API server to build, run and manage macOS VMs.",
+-            version: Version.current,
++            version: MCompVM.version,
+             subcommands: CommandRegistry.allCommands,
+             helpNames: .long
+         )
+@@ -23,15 +23,11 @@ extension Lume {
+     }
+ }
+ 
+-// MARK: - ASCII Art Banner
++// MARK: - Banner
+ extension Lume {
+     static let banner = """
+-    \u{001B}[34m  ⠀⣀⣀⡀⠀⠀⠀⠀⢀⣀⣀⣀⡀⠘⠋⢉⠙⣷⠀⠀ ⠀
+-     ⠀⠀⢀⣴⣿⡿⠋⣉⠁⣠⣾⣿⣿⣿⣿⡿⠿⣦⡈⠀⣿⡇⠃⠀
+-     ⠀⠀⠀⣽⣿⣧⠀⠃⢰⣿⣿⡏⠙⣿⠿⢧⣀⣼⣷⠀⡿⠃⠀⠀
+-     ⠀⠀⠀⠉⣿⣿⣦⠀⢿⣿⣿⣷⣾⡏⠀⠀⢹⣿⣿⠀⠀⠀⠀⠀⠀
+-     ⠀⠀⠀⠀⠀⠉⠛⠁⠈⠿⣿⣿⣿⣷⣄⣠⡼⠟⠁\u{001B}[0m\u{001B}[1m  lume v\(Version.current)\u{001B}[0m
+-    \u{001B}[34m           macOS VM CLI and server\u{001B}[0m
++    \(MCompVM.name) \(MCompVM.version): metacomputer's build of Lume \(Version.current)
++    Made by Metavert, not by Cua, and not endorsed by them.
+     """
+ 
+     static func printBanner() {
+@@ -60,7 +56,7 @@ extension Lume {
+ extension Lume {
+     public static func main() {
+         if let runContext = directRunContext() {
+-            ProcessInfo.processInfo.processName = "Lume — \(runContext.vmName)"
++            ProcessInfo.processInfo.processName = "\(MCompVM.name) — \(runContext.vmName)"
+             do {
+                 try NativeApplicationLoop.run(
+                     showsStartupWindow: runContext.showsNativeDisplayAtLaunch
+diff --git a/libs/lume/src/VM/NativeApplicationLoop.swift b/libs/lume/src/VM/NativeApplicationLoop.swift
+index a65e499..b231640 100644
+--- a/libs/lume/src/VM/NativeApplicationLoop.swift
++++ b/libs/lume/src/VM/NativeApplicationLoop.swift
+@@ -102,7 +102,7 @@ enum NativeApplicationLoop {
+             backing: .buffered,
+             defer: false
+         )
+-        window.title = "Starting Lume Native Display…"
++        window.title = "Starting \(MCompVM.name) Native Display…"
+         window.isReleasedWhenClosed = false
+ 
+         let label = NSTextField(labelWithString: "Starting virtual machine…")
+diff --git a/libs/lume/src/VM/VMDisplayPresenter.swift b/libs/lume/src/VM/VMDisplayPresenter.swift
+index f2ca68d..8737fcb 100644
+--- a/libs/lume/src/VM/VMDisplayPresenter.swift
++++ b/libs/lume/src/VM/VMDisplayPresenter.swift
+@@ -412,7 +412,7 @@ final class NativeVMDisplayPresenter: NSObject, VMDisplayPresenter, NSWindowDele
+             backing: .buffered,
+             defer: false
+         )
+-        window.title = "Lume — \(vmName)"
++        window.title = "\(MCompVM.name) — \(vmName)"
+         window.subtitle = "System keys remain with host"
+         window.contentView = container
+         window.contentAspectRatio = NSSize(width: resolution.width, height: resolution.height)
+@@ -460,7 +460,7 @@ final class NativeVMDisplayPresenter: NSObject, VMDisplayPresenter, NSWindowDele
+         let mainMenu = NSMenu()
+ 
+         let applicationItem = NSMenuItem()
+-        applicationItem.submenu = NSMenu(title: "Lume — \(vmName)")
++        applicationItem.submenu = NSMenu(title: "\(MCompVM.name) — \(vmName)")
+         mainMenu.addItem(applicationItem)
+ 
+         let fileItem = NSMenuItem()
+diff --git a/libs/lume/tests/MCompVMNameTests.swift b/libs/lume/tests/MCompVMNameTests.swift
+new file mode 100644
+index 0000000..71708aa
+--- /dev/null
++++ b/libs/lume/tests/MCompVMNameTests.swift
+@@ -0,0 +1,35 @@
++import ArgumentParser
++import Testing
++
++@testable import lume
++
++@MainActor
++@Suite("mcomp-vm's name and version")
++struct MCompVMNameTests {
++    @Test("--version prints the Lume version and the mcomp-vm revision")
++    func versionNamesTheBuild() {
++        #expect(Lume.configuration.version == "\(Lume.Version.current)-mcomp.\(MCompVM.revision)")
++    }
++
++    @Test("Usage lines name the command mcomp-vm")
++    func usageNamesTheCommand() {
++        #expect(Lume.configuration.commandName == "mcomp-vm")
++        #expect(Lume.helpMessage(for: Run.self, columns: 200).contains("USAGE: mcomp-vm run "))
++    }
++
++    @Test("The help banner names mcomp-vm as a build of Lume, without Lume's logo")
++    func bannerNamesTheBuild() {
++        let lines = Lume.banner.split(separator: "\n").map(String.init)
++        #expect(
++            lines.first
++                == "mcomp-vm \(MCompVM.version): metacomputer's build of Lume \(Lume.Version.current)")
++        // Lume's banner drew a logo in Braille characters.
++        #expect(!Lume.banner.unicodeScalars.contains { (0x2800...0x28FF).contains($0.value) })
++    }
++
++    @Test("Lume's own version is unchanged for the API, the update check and telemetry")
++    func lumeVersionUnchanged() {
++        #expect(!Lume.Version.current.contains("mcomp"))
++        #expect(MCompVM.version.hasPrefix(Lume.Version.current + "-mcomp."))
++    }
++}

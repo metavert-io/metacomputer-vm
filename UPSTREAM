@@ -1,0 +1,8 @@
+# The Lume release mcomp-vm is built from (sourced by build.sh).
+UPSTREAM_REPO=https://github.com/trycua/cua.git
+UPSTREAM_TAG=lume-v0.7.2
+UPSTREAM_COMMIT=f30fbc07a1d04879b5e4bce1e3cb10b12998bd96
+LUME_VERSION=0.7.2
+# mcomp-vm's revision: --version prints LUME_VERSION-mcomp.MCOMP_REVISION.
+# MCompVM.revision in patches/0002-mcomp-vm-name-and-version.patch must match.
+MCOMP_REVISION=2
