@@ -131,11 +131,11 @@ this repository's `install.sh`.
   `upstream=lume-v<version> <commit>` line; `run --help` listing
   `--no-host-sharing`; `--version` output containing the Lume version
   (`0.7.2`); the wrapper `~/.local/bin/mcomp-vm` and the install folder
-  `~/.local/share/mcomp-vm` with the binary named `lume` inside.
-- Check how metacomputer's installer decides an existing install is current.
-  It compares `BUILD_INFO`'s `upstream=` line, so a release that changes
-  only the revision doesn't replace an existing install unless that check
-  also reads `version=`. Mention it in the metacomputer pull request.
+  `~/.local/share/mcomp-vm` with the binary named `lume` inside, and
+  `BUILD_INFO`'s `version=<lume>-mcomp.<n>` line: metacomputer's installer
+  treats an existing install as current only when that line matches its
+  `MCOMP_VM_TAG` (and `run --help` lists `--no-host-sharing`), so every new
+  revision replaces older installs.
 
 ## Naming
 

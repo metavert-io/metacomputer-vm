@@ -49,7 +49,7 @@ Needs an Apple-silicon Mac, git, and Swift (Apple's Command Line Tools:
 ```bash
 git clone https://github.com/metavert-io/metacomputer-vm.git
 cd metacomputer-vm
-./install.sh            # builds (about a minute) and installs ~/.local/bin/mcomp-vm
+./install.sh            # builds (about two minutes) and installs ~/.local/bin/mcomp-vm
 ```
 
 It installs as its own command, `mcomp-vm`, next to any standard `lume`;
